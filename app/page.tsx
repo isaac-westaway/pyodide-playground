@@ -3,19 +3,23 @@
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { placeholder1, placeholder2, placeholder3, placeholder4 } from "./placeholders"
+import { placeholder1, placeholder2, placeholder3, placeholder4, placeholder5, placeholder6, placeholder7 } from "./placeholders"
+import { captureCode } from "./python"
+import { createHtmlReactComponent } from "./hoc"
+import type { PyProxy } from "pyodide/ffi"
 
 interface Pyodide {
-    runPython: (code: string) => unknown
-    runPythonAsync: (code: string, opts?: { globals?: Record<string, unknown> }) => Promise<unknown>
+    runPython: (code: string, opts?: { globals?: PyProxy }) => unknown
+    runPythonAsync: (code: string, opts?: { globals?: PyProxy }) => Promise<unknown>
     loadPackage: (pkg: string) => Promise<void>
-    globals: Record<string, unknown>
+    globals: PyProxy
 }
 
 type Cell = {
     id: string
     code: string
-    output: string
+    textOutput?: string
+    HtmlReactComponent?: React.FC | null
 }
 
 declare global {
@@ -36,33 +40,21 @@ const AVAILABLE_LIBRARIES = [
     { name: "scipy", pyodide: "scipy" },
     { name: "sympy", pyodide: "sympy" },
     { name: "requests", pyodide: "micropip" },
-    // { name: "pytorch", pyodide: "torch" }, // pytorch is NOT supported due to the huge wasmbinary size and extensive c++ backend
 ]
 
-// Todos:
-// implement a way so that only changed cells are re-ran when running a cell and re-running all previous cells
-// also implement a way to run all cels at once, sequentially
-// also implement a way so that an error in cell previous does not block execution of cell subsequent
-// implement MIME types to support rich outputs like images, HTML
-// also rich inputs like sliders, which can be access in python as a widget
-// also a c++ one similar to this, as jupyterlab exposes a c++ kernel called xeus-cling // but this will be done in a different project
-// also add a way to output return values, instead of having to always print
-// also add a way to import an ipynb file, and convert it to this format, and vice versa
-// also add a way to export the current notebook to an ipynb file
-// also add a way to cache the notebook in local storage, so that it can be reloaded later
-
-// we wil not support markdown cells, as this is a poc, and markdown cells and latex is already existing in our main app
 export default function PythonNotebook() {
     const [cells, setCells] = useState<Cell[]>([
-        { id: generateId(), code: placeholder1, output: "" },
-        { id: generateId(), code: placeholder2, output: "" },
-        { id: generateId(), code: placeholder3, output: "" },
-        { id: generateId(), code: placeholder4, output: "" }
+        { id: generateId(), code: placeholder1, textOutput: "", HtmlReactComponent: null },
+        { id: generateId(), code: placeholder2, textOutput: "", HtmlReactComponent: null },
+        { id: generateId(), code: placeholder3, textOutput: "", HtmlReactComponent: null },
+        { id: generateId(), code: placeholder4, textOutput: "", HtmlReactComponent: null },
+        { id: generateId(), code: placeholder5, textOutput: "", HtmlReactComponent: null},
+        { id: generateId(), code: placeholder6, textOutput: "", HtmlReactComponent: null },
+        { id: generateId(), code: placeholder7, textOutput: "", HtmlReactComponent: null },
     ])
     const [isLoading, setIsLoading] = useState(false)
     const [pyodideReady, setPyodideReady] = useState(false)
     const pyodideRef = useRef<Pyodide | null>(null)
-
     const [selectedLibs, setSelectedLibs] = useState<string[]>([])
 
     useEffect(() => {
@@ -77,33 +69,33 @@ export default function PythonNotebook() {
                 await pyodide.loadPackage(lib)
             } catch (e) {
                 console.error(`Failed to load package ${lib}:`, e)
-                // Optionally handle errors
             }
         }
     }
 
     const initializePyodide = async () => {
         setIsLoading(true)
-        setPyodideReady(false)
-        setTimeout(async () => {
-            if (typeof window.loadPyodide !== "function") {
-                await new Promise((resolve, reject) => {
-                    const script = document.createElement("script")
-                    script.src = "https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"
-                    script.async = true
-                    script.onload = resolve
-                    script.onerror = reject
-                    document.head.appendChild(script)
-                })
-            }
-
-            const pyodide = await window.loadPyodide({
-                indexURL: "https://cdn.jsdelivr.net/pyodide/v0.24.1/full/",
+        if (typeof window.loadPyodide !== "function") {
+            await new Promise((resolve, reject) => {
+                const script = document.createElement("script")
+                script.src = "https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"
+                script.async = true
+                script.onload = resolve
+                script.onerror = reject
+                document.head.appendChild(script)
             })
-            pyodideRef.current = pyodide
-            setPyodideReady(true)
-            setIsLoading(false)
-        }, 100)
+        }
+
+        const pyodide = await window.loadPyodide({
+            indexURL: "https://cdn.jsdelivr.net/pyodide/v0.24.1/full/",
+        })
+
+        // Create a shared globals scope to persist variables/functions
+        pyodide.globals.set("__notebook_globals__", pyodide.globals)
+
+        pyodideRef.current = pyodide
+        setPyodideReady(true)
+        setIsLoading(false)
     }
 
     const runCell = async (cellIdx: number) => {
@@ -111,45 +103,52 @@ export default function PythonNotebook() {
         setIsLoading(true)
         const pyodide = pyodideRef.current
 
-        await ensurePackages();
-
-        // this is how jupyterlab does it
-        pyodide.runPython(`
-import sys
-import builtins
-for k in list(globals().keys()):
-    if k not in ['__name__', '__doc__', '__package__', '__loader__', '__spec__', '__builtins__']:
-        del globals()[k]
-`)
+        await ensurePackages()
 
         let output = ""
-        for (let i = 0; i <= cellIdx; i++) {
-            const code = cells[i].code
-            try {
-                const captureCode = `
-import sys
-import io
-from contextlib import redirect_stdout
+        const jsonOutput: { text: string; html: string } = { text: "", html: "" }
 
-captured_output = io.StringIO()
-with redirect_stdout(captured_output):
-${code
-                        .split("\n")
-                        .map((line) => (line.trim() === "" ? "" : "    " + line))
-                        .join("\n")}
+        const code = cells[cellIdx].code
 
-output_value = captured_output.getvalue()
-output_value
-`
-                output = String(await pyodide.runPythonAsync(captureCode, { globals: pyodide.globals }))
-            } catch (err: unknown) {
-                output = "Python Error: " + (err?.toString?.() ?? "Unknown error")
-                break
-            }
+        try {
+            const capturedCode = captureCode(code);
+
+            const result = await pyodide.runPythonAsync(capturedCode, { globals: pyodide.globals })
+
+            output = String(result)
+
+            console.log("Captured output:", output)
+
+            const parsedOutput = JSON.parse(output)
+            if (parsedOutput.text !== '') jsonOutput.text = parsedOutput.text
+            if (parsedOutput.html !== '') jsonOutput.html = parsedOutput.html
+
+            console.log("Parsed Text output:", jsonOutput.text)
+            console.log("Parsed HTML output:", jsonOutput.html)
+
+            console.log("Parsed JSON output:", JSON.parse(output))
+        } catch (err: unknown) {
+            output = "Python Error: " + (err?.toString?.() || "Unknown error")
         }
+
+        const isEmptyText = jsonOutput.text === ""
+        const isEmptyHtml = jsonOutput.html === ""
+
+        console.log("Is empty text:", isEmptyText)
+        console.log("Is empty HTML:", isEmptyHtml)
+
+        if (!isEmptyText && isEmptyHtml) output = jsonOutput.text
+        else if (isEmptyText && !isEmptyHtml) output = jsonOutput.html
+        else if (isEmptyText && isEmptyHtml) output = ""
+        const HtmlReactComponent = jsonOutput.html
+            ? createHtmlReactComponent(jsonOutput.html)
+            : null;
+
         setCells(cells =>
             cells.map((cell, idx) =>
-                idx === cellIdx ? { ...cell, output } : cell
+                idx === cellIdx
+                    ? { ...cell, textOutput: jsonOutput.text, HtmlReactComponent }
+                    : cell
             )
         )
         setIsLoading(false)
@@ -173,12 +172,12 @@ output_value
             <div className="max-w-4xl mx-auto space-y-4">
                 <Card>
                     <CardHeader>
-                        <CardTitle>Jupyter-like python notebook (Pyodide)</CardTitle>
-                        <p className="text-sm text-gray-600">add, edit, and run cells in browser memory</p>
+                        <CardTitle>Python Notebook (Persistent Kernel)</CardTitle>
+                        <p className="text-sm text-gray-600">Run cells with shared namespace, just like JupyterLab</p>
                     </CardHeader>
                     <CardContent className="space-y-4">
-                        <div className="mb-4">
-                            <label className="block mb-1 font-medium">add libraries:</label>
+                        <div>
+                            <label className="block mb-1 font-medium">Add libraries:</label>
                             <select
                                 multiple
                                 className="border rounded p-2 w-full"
@@ -197,6 +196,7 @@ output_value
                             </select>
                             <div className="text-xs text-gray-500 mt-1">Hold Ctrl (Windows) or Cmd (Mac) to select multiple.</div>
                         </div>
+
                         {cells.map((cell, idx) => (
                             <div key={cell.id} className="mb-6 border rounded p-3 bg-white">
                                 <div className="flex gap-2 mb-2">
@@ -212,7 +212,7 @@ output_value
                                 </div>
                                 <textarea
                                     spellCheck="false"
-                                    className="w-full h-24 p-2 border border-gray-300 rounded font-mono text-sm resize-y"
+                                    className="w-full h-56 p-2 border border-gray-300 rounded font-mono text-sm resize-y"
                                     value={cell.code}
                                     onChange={e => {
                                         const code = e.target.value
@@ -222,17 +222,26 @@ output_value
                                     }}
                                     disabled={isLoading}
                                 />
-                                <pre className="w-full min-h-8 mt-2 p-2 bg-black text-green-400 rounded font-mono text-sm whitespace-pre-wrap overflow-auto border">
-                                    {cell.output}
-                                </pre>
+                                {cell.textOutput && (
+                                    <pre className="mt-2 p-2 bg-gray-100 rounded text-sm font-mono whitespace-pre-wrap">
+                                        {cell.textOutput}
+                                    </pre>
+                                )}
+                                {cell.HtmlReactComponent && (
+                                    <div className="mt-2 p-2 bg-gray-100 rounded text-sm font-mono whitespace-pre-wrap">
+                                        <cell.HtmlReactComponent />
+                                    </div>
+                                )}
                             </div>
                         ))}
+
                         <div className="flex items-center justify-between text-xs text-gray-500">
                             <span>status: {pyodideReady ? "✅ Pyodide Ready" : "⏳ Loading Pyodide..."}</span>
-                            <span>by pyodide wasm</span>
+                            <span>shared namespace active</span>
                         </div>
                     </CardContent>
                 </Card>
+                {/* <TestComponent /> */}
             </div>
         </div>
     )

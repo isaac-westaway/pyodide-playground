@@ -1,4 +1,9 @@
-export const placeholder1 =`import numpy as np # YOU MUST SELECT NUMPY FROM THE LIBRARY SELECTOR ABOVE`;
+export const placeholder1 =`import numpy as np # YOU MUST SELECT NUMPY FROM THE LIBRARY SELECTOR ABOVE
+import matplotlib.pyplot as plt # YOU MUST SELECT MATPLOTLIB FROM THE LIBRARY SELECTOR ABOVE
+import math
+
+%matplotlib inline # this line is optional, but recommended
+`;
 
 export const placeholder2 = `class Vector:
     def __init__(self, components):
@@ -48,4 +53,19 @@ print(v1 + v2)  # Should print Vector([5. 7. 9.])
 `
 
 export const placeholder4 = `print(v1.dot(v2))  # Should print 32.0
+`;
+
+export const placeholder5 = `def f(x):
+    return math.e ** x
+`;
+
+export const placeholder6 = `f(0) # Should print 1.0`
+
+export const placeholder7 = `xs = np.arange(-5, 5, 0.1)
+ys = f(xs)
+plt.plot(xs, ys)
+plt.title("Plot of f(x) = e^x")
+plt.xlabel("x")
+plt.ylabel("f(x)")
+plt.grid() # no need for plt.show()
 `;
